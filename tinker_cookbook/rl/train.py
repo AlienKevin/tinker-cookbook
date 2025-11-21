@@ -158,7 +158,7 @@ async def forward_backward(
     training_client: tinker.TrainingClient,
     batch_d: List[tinker.Datum],
     loss_fn: Literal["importance_sampling", "ppo"],
-) -> List[torch.Tensor]:
+) -> tuple[List[torch.Tensor], dict[str, float]]:
     """Accumulate gradients on a minibatch of data"""
     fwd_bwd_future = await training_client.forward_backward_async(
         list(map(remove_mask, batch_d)), loss_fn=loss_fn
@@ -171,8 +171,10 @@ async def forward_backward(
         training_logprobs = output["logprobs"].to_torch()
         training_logprobs_D.append(training_logprobs)
 
-    # We dont display fwd_bwd_result.metrics to avoid spam
-    return training_logprobs_D
+    # Extract loss from metrics
+    metrics = {}
+    metrics["optim/loss"] = fwd_bwd_result.metrics["loss:sum"]
+    return training_logprobs_D, metrics
 
 
 @scope
@@ -182,15 +184,26 @@ async def train_step(
     learning_rate: float,
     num_substeps: int,
     loss_fn: Literal["importance_sampling", "ppo"],
-) -> List[torch.Tensor]:
+) -> tuple[List[torch.Tensor], dict[str, float]]:
     """Train the model on collected trajectories."""
     batches_md = split_list(data_D, min(num_substeps, len(data_D)))
     training_logprobs_D: list[torch.Tensor] = []
+    total_loss = 0.0
+    num_batches_with_loss = 0
+
     for batch_d in batches_md:
-        training_logprobs = await forward_backward(training_client, batch_d, loss_fn)
+        training_logprobs, metrics = await forward_backward(training_client, batch_d, loss_fn)
         training_logprobs_D.extend(training_logprobs)
+        if "optim/loss" in metrics:
+            total_loss += metrics["optim/loss"]
+            num_batches_with_loss += 1
         await optim_step(training_client, learning_rate)
-    return training_logprobs_D
+
+    metrics = {}
+    if num_batches_with_loss > 0:
+        metrics["optim/loss"] = total_loss / num_batches_with_loss
+
+    return training_logprobs_D, metrics
 
 
 @chz.chz
@@ -916,13 +929,14 @@ async def do_train_step_and_get_sampling_client(
     metrics.update(prepare_minibatch_metrics)
 
     with timed("train", metrics):
-        training_logprobs_D = await train_step(
+        training_logprobs_D, train_metrics = await train_step(
             data_D,
             training_client,
             cfg.learning_rate,
             cfg.num_substeps,
             cfg.loss_fn,
         )
+        metrics.update(train_metrics)
 
     sampling_client, full_batch_metrics = await compute_full_batch_metrics_and_get_sampling_client(
         training_client,
