@@ -1030,6 +1030,24 @@ async def do_sync_training(
             trajectory_groups_P,
         )
 
+        # Log samples to Wandb
+        if cfg.num_groups_to_log > 0:
+            columns = ["prompt", "response"]
+            data = []
+            for traj_group in trajectory_groups_P[: cfg.num_groups_to_log]:
+                for traj in traj_group.trajectories_G:
+                    for transition in traj.transitions:
+                        prompt = tokenizer.decode(transition.ob.to_ints())
+                        response = tokenizer.decode(transition.ac.tokens)
+                        data.append([prompt, response])
+            
+            ml_logger.log_table(
+                key="env/all/samples",
+                columns=columns,
+                data=data,
+                step=i_batch,
+            )
+
         # Log metrics
         metrics.update(train_step_metrics)
         metrics["time/total"] = time.time() - t_start

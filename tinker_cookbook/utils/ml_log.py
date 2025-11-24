@@ -84,6 +84,12 @@ class Logger(ABC):
         """Log metrics dictionary with optional step number."""
         pass
 
+    def log_table(
+        self, key: str, columns: List[str], data: List[List[Any]], step: int | None = None
+    ) -> None:
+        """Log a table of data (optional to implement)."""
+        pass
+
     def log_long_text(self, key: str, text: str) -> None:
         """Log long text content (optional to implement)."""
         pass
@@ -140,7 +146,18 @@ class JsonLogger(Logger):
 
         with open(self.metrics_file, "a") as f:
             f.write(json.dumps(log_entry) + "\n")
+            f.write(json.dumps(log_entry) + "\n")
             logger.info("Wrote metrics to %s", self.metrics_file)
+
+    def log_table(
+        self, key: str, columns: List[str], data: List[List[Any]], step: int | None = None
+    ) -> None:
+        """Log table to JSONL file (as a list of dicts)."""
+        # For JSON logging, we can just log it as a metric where the value is the table data
+        # or we could write to a separate file. Here we'll just log it as a metric for simplicity
+        # but with a special key to indicate it's a table.
+        table_data = {"columns": columns, "data": data}
+        self.log_metrics({key: table_data}, step=step)
 
 
 class PrettyPrintLogger(Logger):
@@ -176,6 +193,22 @@ class PrettyPrintLogger(Logger):
             else:
                 value_str = str(value)
             table.add_row(key, value_str)
+
+        with _rich_console_use_logger(self.console):
+            self.console.print(table)
+
+    def log_table(
+        self, key: str, columns: List[str], data: List[List[Any]], step: int | None = None
+    ) -> None:
+        """Display table in console."""
+        table = Table(show_header=True, header_style="bold magenta", title=f"{key} (Step {step})")
+        for col in columns:
+            table.add_column(col)
+        
+        for row in data:
+            # Convert all items to string for display
+            str_row = [str(item) for item in row]
+            table.add_row(*str_row)
 
         with _rich_console_use_logger(self.console):
             self.console.print(table)
@@ -233,7 +266,16 @@ class WandbLogger(Logger):
         """Log metrics to wandb."""
         if self.run and wandb is not None:
             wandb.log(metrics, step=step)
+            wandb.log(metrics, step=step)
             logger.info("Logging to: %s", self.run.url)
+
+    def log_table(
+        self, key: str, columns: List[str], data: List[List[Any]], step: int | None = None
+    ) -> None:
+        """Log table to wandb."""
+        if self.run and wandb is not None:
+            table = wandb.Table(columns=columns, data=data)
+            wandb.log({key: table}, step=step)
 
     def close(self) -> None:
         """Close wandb run."""
@@ -352,6 +394,13 @@ class MultiplexLogger(Logger):
         """Forward log_metrics to all child loggers."""
         for logger in self.loggers:
             logger.log_metrics(metrics, step)
+
+    def log_table(
+        self, key: str, columns: List[str], data: List[List[Any]], step: int | None = None
+    ) -> None:
+        """Forward log_table to all child loggers."""
+        for logger in self.loggers:
+            logger.log_table(key, columns, data, step)
 
     def log_long_text(self, key: str, text: str) -> None:
         """Forward log_long_text to all child loggers."""
