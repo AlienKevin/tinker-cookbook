@@ -135,6 +135,39 @@ def print_group(traj_group: TrajectoryGroup, tokenizer: Tokenizer):
 
 
 @scope
+def log_trajectory_groups(
+    traj_groups: list[TrajectoryGroup],
+    tokenizer: Tokenizer,
+    ml_logger: ml_log.Logger,
+    key: str,
+    step: int,
+    max_groups: int,
+):
+    """
+    Log a subset of the trajectory groups to a Wandb table.
+    """
+    if max_groups <= 0:
+        return
+
+    columns = ["prompt", "response", "reward"]
+    data = []
+    for traj_group in traj_groups[:max_groups]:
+        rewards = traj_group.get_total_rewards()
+        for i, traj in enumerate(traj_group.trajectories_G):
+            for transition in traj.transitions:
+                prompt = tokenizer.decode(transition.ob.to_ints())
+                response = tokenizer.decode(transition.ac.tokens)
+                data.append([prompt, response, rewards[i]])
+
+    ml_logger.log_table(
+        key=key,
+        columns=columns,
+        data=data,
+        step=step,
+    )
+
+
+@scope
 async def optim_step(
     training_client: tinker.TrainingClient,
     learning_rate: float,
@@ -276,7 +309,14 @@ class Config:
 
 
 @scope
-async def run_single_evaluation(evaluator, cfg, i_batch, sampling_client):
+async def run_single_evaluation(
+    evaluator,
+    cfg,
+    i_batch,
+    sampling_client,
+    ml_logger: ml_log.Logger | None = None,
+    tokenizer: Tokenizer | None = None,
+):
     ev_name = _get_evaluator_name(evaluator)
     with _get_logtree_scope(
         log_path=cfg.log_path,
@@ -284,7 +324,22 @@ async def run_single_evaluation(evaluator, cfg, i_batch, sampling_client):
         f_name=f"eval_{ev_name}_iteration_{i_batch:06d}",
         scope_name=f"Running evaluation {ev_name} {i_batch}",
     ):
-        eval_metrics = await evaluator(sampling_client)
+        result = await evaluator(sampling_client)
+        if isinstance(result, dict) and "metrics" in result and "trajectory_groups" in result:
+            eval_metrics = result["metrics"]
+            trajectory_groups = result["trajectory_groups"]
+            if ml_logger is not None and tokenizer is not None:
+                log_trajectory_groups(
+                    trajectory_groups,
+                    tokenizer,
+                    ml_logger,
+                    key=f"test/{ev_name}/samples" if ev_name else "test/samples",
+                    step=i_batch,
+                    max_groups=len(trajectory_groups),
+                )
+        else:
+            eval_metrics = result
+
         return {f"test/{k}": v for k, v in eval_metrics.items()}
 
 
@@ -294,6 +349,8 @@ async def run_evaluations_parallel(
     sampling_client: tinker.SamplingClient,
     cfg: Config,
     i_batch: int,
+    ml_logger: ml_log.Logger | None = None,
+    tokenizer: Tokenizer | None = None,
 ) -> dict[str, Any]:
     """Run all evaluators in parallel and return aggregated metrics."""
 
@@ -302,7 +359,9 @@ async def run_evaluations_parallel(
     for i, evaluator in enumerate(evaluators):
         ev_name = _get_evaluator_name(evaluator)
         task = asyncio.create_task(
-            run_single_evaluation(evaluator, cfg, i_batch, sampling_client),
+            run_single_evaluation(
+                evaluator, cfg, i_batch, sampling_client, ml_logger, tokenizer
+            ),
             name=f"eval_{ev_name or i}_iteration_{i_batch:06d}",
         )
         tasks.append(task)
@@ -354,7 +413,7 @@ async def do_sync_training_with_stream_minibatch(
         if (cfg.eval_every > 0 and i_batch % cfg.eval_every == 0) or i_batch == end_batch - 1:
             with timed("run_evals", metrics):
                 eval_metrics = await run_evaluations_parallel(
-                    evaluators, sampling_client, cfg, i_batch
+                    evaluators, sampling_client, cfg, i_batch, ml_logger, tokenizer
                 )
                 metrics.update(eval_metrics)
 
@@ -648,9 +707,15 @@ async def do_async_training(
             sampling_client_eval = sampling_client
             if cfg.eval_every > 0 and sampling_client_eval_step % cfg.eval_every == 0:
                 with timed("run_evals", metrics):
-                    for evaluator in evaluators:
-                        eval_metrics = await evaluator(sampling_client_eval)
-                        metrics.update({f"test/{k}": v for k, v in eval_metrics.items()})
+                    eval_metrics = await run_evaluations_parallel(
+                        evaluators,
+                        sampling_client_eval,
+                        cfg,
+                        sampling_client_eval_step,
+                        ml_logger,
+                        tokenizer,
+                    )
+                    metrics.update(eval_metrics)
                 metrics["time/evaluation_loop/total"] = time.time() - t_start
                 ml_logger.log_metrics(metrics, step=sampling_client_eval_step)
 
@@ -984,7 +1049,7 @@ async def do_sync_training(
         if cfg.eval_every > 0 and i_batch % cfg.eval_every == 0:
             with timed("run_evals", metrics):
                 eval_metrics = await run_evaluations_parallel(
-                    evaluators, sampling_client, cfg, i_batch
+                    evaluators, sampling_client, cfg, i_batch, ml_logger, tokenizer
                 )
                 metrics.update(eval_metrics)
 
@@ -1031,22 +1096,14 @@ async def do_sync_training(
         )
 
         # Log samples to Wandb
-        if cfg.num_groups_to_log > 0:
-            columns = ["prompt", "response"]
-            data = []
-            for traj_group in trajectory_groups_P[: cfg.num_groups_to_log]:
-                for traj in traj_group.trajectories_G:
-                    for transition in traj.transitions:
-                        prompt = tokenizer.decode(transition.ob.to_ints())
-                        response = tokenizer.decode(transition.ac.tokens)
-                        data.append([prompt, response])
-            
-            ml_logger.log_table(
-                key="env/all/samples",
-                columns=columns,
-                data=data,
-                step=i_batch,
-            )
+        log_trajectory_groups(
+            trajectory_groups_P,
+            tokenizer,
+            ml_logger,
+            key="env/all/samples",
+            step=i_batch,
+            max_groups=cfg.num_groups_to_log,
+        )
 
         # Log metrics
         metrics.update(train_step_metrics)

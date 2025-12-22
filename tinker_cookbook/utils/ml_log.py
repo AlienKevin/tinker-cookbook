@@ -13,6 +13,7 @@ from typing import Any, Dict, List
 import chz
 from rich.console import Console
 from rich.table import Table
+from rich.markup import escape
 from tinker_cookbook.utils.code_state import code_state
 
 logger = logging.getLogger(__name__)
@@ -191,7 +192,7 @@ class PrettyPrintLogger(Logger):
             if isinstance(value, float):
                 value_str = f"{value:.6f}"
             else:
-                value_str = str(value)
+                value_str = escape(str(value))
             table.add_row(key, value_str)
 
         with _rich_console_use_logger(self.console):
@@ -206,8 +207,8 @@ class PrettyPrintLogger(Logger):
             table.add_column(col)
         
         for row in data:
-            # Convert all items to string for display
-            str_row = [str(item) for item in row]
+            # Convert all items to string for display and escape rich markup
+            str_row = [escape(str(item)) for item in row]
             table.add_row(*str_row)
 
         with _rich_console_use_logger(self.console):

@@ -131,4 +131,4 @@ class RLTestSetEvaluator(SamplingClientEvaluator):
 
         if self.name is not None:
             metrics = {f"{self.name}/{k}": v for k, v in metrics.items()}
-        return metrics
+        return {"metrics": metrics, "trajectory_groups": trajectory_groups_P}
